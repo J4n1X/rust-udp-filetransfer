@@ -1,0 +1,15 @@
+[package]
+name = "rust-udp-filetransfer"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+ctrlc = "3.2.2"
+tokio = { version = "1", features = ["full"] }
+stunclient = "0.3.1"
+
+#[build-dependencies]
+#cc = "1.0"
+#bindgen = "0.53.1"
