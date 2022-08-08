@@ -9,6 +9,7 @@ edition = "2021"
 ctrlc = "3.2.2"
 tokio = { version = "1", features = ["full"] }
 stunclient = "0.3.1"
+crypto-hash = "0.3.4"
 
 #[build-dependencies]
 #cc = "1.0"

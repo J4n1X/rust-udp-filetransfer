@@ -1,3 +1,5 @@
+mod protocol;
+
 use tokio::io::{BufReader, AsyncReadExt};
 use tokio::net::{UdpSocket};
 use tokio::sync::{broadcast, mpsc};
@@ -5,38 +7,13 @@ use tokio::fs::File;
 use std::net::{SocketAddr,ToSocketAddrs};
 use std::env;
 use std::sync::Arc;
-
-const UFT_BUFFER_SIZE: usize = 4096;
-
-// Client status messages
-const UFT_FILE_REQUEST: u8 = 1 << 0;
-const UFT_BLOCK_REQUEST: u8 = 1 << 1;
-const UFT_FILE_RECEIVED: u8 = 1 << 2;
-
-// Server status messages
-const UFT_FILE_PARTIAL: u8 = 1 << 3;
-const UFT_FILE_COMPLETE: u8 = 1 << 4;
-
-// Universal status messages
-const UFT_GENERAL_ERROR: u8 = u8::MAX;
-
-const UFT_SERVER_MAX_SYM: usize = 16;
-const UTF_SERVER_MAX_LISTENER_BLOCKS: usize = 64;
+use crate::protocol::*;
 
 #[derive(Debug, Clone)]
 enum ClientServeReturnState {
     Complete(SocketAddr, String), // Client, File sent
     Error(String) // Error message
 }
-
-// Protocol specification
-// 1. Connecting
-//      Client sends status byte UFT_FILE_REQUEST:
-//          The client is added to a serving queue where blocks of data are sent, prefixed by UFT_FILE_PARTIAL + the block number
-//          Should a block be missing, the client will note them down and request them later.
-//          At the end of the transfer, the server sends the last block with UFT_FILE_COMPLETE.
-//          Should the client still need blocks, then the listener thread will serve the remaining blocks 
-//          as long as the amount of desired blocks is less than UTF_SERVER_MAX_LISTENER_BLOCKS, otherwise the entire file is served anew.
 
 fn string_from_buffer(buf: &[u8]) -> String {
     String::from_utf8_lossy(&buf[..buf.iter()
@@ -176,6 +153,8 @@ impl UdpServer {
     }
 
     pub fn serve_file(&self, target_client: SocketAddr, target_file: String, done_sender: mpsc::Sender<ClientServeReturnState>) {
+        use crate::protocol::UftServerStatus::*;
+
         println!("Serving file {} to client {}", target_file, target_client);
         let socket = self.socket.clone();
         let mut shutdown = self.shutdown.clone();
@@ -190,10 +169,10 @@ impl UdpServer {
                 if read_bytes == 0{
                     return; // skip writing
                 } else if read_bytes == UFT_BUFFER_SIZE {
-                    buf_data[0] = UFT_FILE_PARTIAL;
+                    buf_data[0] = FILE_DATA as u8;
                     buf_data[1..9].clone_from_slice(&sent_blocks.to_be_bytes());
                 } else if read_bytes > 0 { 
-                    buf_data[0] = UFT_FILE_COMPLETE;
+                    buf_data[0] = FILE_COMPLETE as u8;
                     buf_data[1..9].clone_from_slice(&read_bytes.to_be_bytes());
                     complete = true;
                 }
@@ -224,7 +203,7 @@ async fn main() {
             let mut buf = [0u8; UFT_BUFFER_SIZE];
             let file_path_bytes = "test.txt".as_bytes();
             let server: SocketAddr = env::args().nth(2).unwrap().parse().unwrap();
-            buf[0] = UFT_FILE_REQUEST;
+            buf[0] = UftClientStatus::FILE_REQUEST as u8;
             buf[1..(1 + file_path_bytes.len())].clone_from_slice(&file_path_bytes);
             client_socket.connect(server).await.unwrap();
             client_socket.send(&buf).await.unwrap();
@@ -257,4 +236,15 @@ async fn main() {
     };
     
     return;
+}
+
+#[test]
+fn test_hash_array() {
+    use crypto_hash::{Algorithm, digest};
+    let mut buf = [0u8; UFT_BUFFER_SIZE];
+    let file_path_bytes = "test.txt".as_bytes();
+    buf[0] = UftClientStatus::FILE_REQUEST as u8;
+    buf[1..(1 + file_path_bytes.len())].clone_from_slice(&file_path_bytes);
+    let hash = digest(Algorithm::SHA256, &buf);
+    println!("Hash: {:?}\nBytes: {}", hash, hash.len());
 }
