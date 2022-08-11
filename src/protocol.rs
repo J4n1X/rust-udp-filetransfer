@@ -1,4 +1,6 @@
-
+use tokio::net::{TcpListener, TcpStream, TcpSocket};
+use tokio::io::BufReader;
+use crate::shutdown_mgr::ChannelManager;
 
 /* How the file is sent
  * --------------------
@@ -41,7 +43,7 @@ pub const UTF_SERVER_MAX_LISTENER_BLOCKS: usize = 64;
 #[repr(u8)]
 pub enum UftClientStatus {
     FILE_REQUEST = 0,
-    META_RECEIVED,
+    META_RECEIVED, // maybe we can remove this
     BLOCK_REQUEST,
     FILE_RECEIVED,
     HASH_VALID,
@@ -68,3 +70,16 @@ pub enum UftServerError {
 }
 
 pub const UFT_DATA_SIZE: usize = UFT_BUFFER_SIZE - 9;
+
+#[derive(Debug,Clone)]
+struct UftClient {
+    addr: std::net::SocketAddr,
+    file: String,
+    channelmgr: ChannelManager,
+}
+
+pub struct UftListener {
+    listener: TcpListener,
+    client_limit: usize
+}
+

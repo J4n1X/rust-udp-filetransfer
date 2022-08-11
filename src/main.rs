@@ -1,5 +1,7 @@
 mod protocol;
+mod shutdown_mgr;
 
+use shutdown_mgr::ChannelState;
 use tokio::io::{BufReader, AsyncReadExt};
 use tokio::net::{UdpSocket};
 use tokio::sync::{broadcast, mpsc};
@@ -8,12 +10,7 @@ use std::net::{SocketAddr,ToSocketAddrs};
 use std::env;
 use std::sync::Arc;
 use crate::protocol::*;
-
-#[derive(Debug, Clone)]
-enum ClientServeReturnState {
-    Complete(SocketAddr, String), // Client, File sent
-    Error(String) // Error message
-}
+use crate::shutdown_mgr::ChannelManager;
 
 fn string_from_buffer(buf: &[u8]) -> String {
     String::from_utf8_lossy(&buf[..buf.iter()
@@ -21,50 +18,7 @@ fn string_from_buffer(buf: &[u8]) -> String {
         .into_owned()
 }
 
-struct ShutdownManager {
-    shutdown: bool,
-    receiver: broadcast::Receiver<()>,
-    sender: broadcast::Sender<()>,
-}
 
-impl ShutdownManager {
-    pub fn new(sender: broadcast::Sender<()>) -> ShutdownManager{
-        let receiver = sender.subscribe();
-        ShutdownManager {
-            shutdown: false,
-            receiver,
-            sender
-        }
-    }
-
-    pub fn is_shutdown(&self) -> bool {
-        self.shutdown
-    }
-    
-    pub async fn recv(&mut self) {
-        if self.shutdown {
-            return
-        }
-
-        let _ = self.receiver.recv().await;
-        self.shutdown = true;
-    }
-
-    pub fn send(&mut self) {
-        self.shutdown = true;
-        self.sender.send(());
-    }
-}
-
-impl Clone for ShutdownManager {
-    fn clone(&self) -> ShutdownManager {
-        ShutdownManager {
-            shutdown: false,
-            receiver: self.sender.subscribe(),
-            sender: self.sender.clone()
-        }
-    }
-}
 
 // This doesn't really work at all, all it does is retrieve the external port.
 async fn stun_request(socket: &UdpSocket, stun_server: &str) -> SocketAddr {
@@ -86,13 +40,13 @@ struct UdpServer {
     pub pub_addr: SocketAddr,
     pub socket: Arc<UdpSocket>,
     //clients: Arc<Mutex<Vec<ConnectedClient>>>,
-    shutdown: ShutdownManager,
+    channelmgr: ChannelManager,
     max_sym_clients: usize,
 }
 
 impl UdpServer {
     // using https://crates.io/crates/stunclient
-    pub async fn new(listen_ip: &str, stun_addr: &str, shutdownSender: broadcast::Sender<()>, sym_clients: usize) -> UdpServer {
+    pub async fn new(listen_ip: &str, stun_addr: &str, shutdownSender: broadcast::Sender<ChannelState>, sym_clients: usize) -> UdpServer {
         if sym_clients > 1 {
             panic!("Max simultaneous clients is less than 1");
         }
@@ -103,14 +57,14 @@ impl UdpServer {
             own_addr: local_addr,
             pub_addr: pub_addr,
             socket: Arc::new(udp_server_sock),
-            shutdown: ShutdownManager::new(shutdownSender),
+            channelmgr: ChannelManager::new(shutdownSender, None),
             max_sym_clients: sym_clients
         }
     }
 
     pub async fn listen(&mut self) -> Result<(), ()> {
         let mut in_buffer = [0u8; UFT_BUFFER_SIZE];
-        let (client_done_send, mut client_done_recv) = mpsc::channel::<ClientServeReturnState>(self.max_sym_clients);
+        let (client_done_send, mut client_done_recv) = mpsc::channel::<ChannelState>(self.max_sym_clients);
         println!("Server is now listening");
         loop {
             tokio::select! {
@@ -135,16 +89,16 @@ impl UdpServer {
                 },
                 serve_result = client_done_recv.recv() => {
                     match serve_result.unwrap() {
-                        ClientServeReturnState::Complete(client, file) => {
+                        ChannelState::Complete(client, file) => {
                             println!("File {} has been sent to {}", file, client);
                         }
                         _ => {
                             println!("Unknown client result signal received");
-                            self.shutdown.send();
+                            self.channelmgr.shutdown();
                         }
                     }
                 }
-                _ = self.shutdown.recv() => {
+                _ = self.channelmgr.recv() => {
                     println!("Terminating server...");
                     return Ok(());
                 }
@@ -152,12 +106,14 @@ impl UdpServer {
         }
     }
 
-    pub fn serve_file(&self, target_client: SocketAddr, target_file: String, done_sender: mpsc::Sender<ClientServeReturnState>) {
+
+    // TODO: Move to protocol.rs
+    pub fn serve_file(&self, target_client: SocketAddr, target_file: String, done_sender: mpsc::Sender<ChannelState>) {
         use crate::protocol::UftServerStatus::*;
 
         println!("Serving file {} to client {}", target_file, target_client);
         let socket = self.socket.clone();
-        let mut shutdown = self.shutdown.clone();
+        let mut shutdown = self.channelmgr.clone();
         tokio::spawn(async move {
             let mut file_reader = BufReader::new(File::open(&target_file).await.expect("Could not open file"));
             let mut sent_blocks: usize = 0;
@@ -188,7 +144,7 @@ impl UdpServer {
                 };
             }
             println!("Wrote {} bytes to {}!", read_bytes, target_client);
-            done_sender.send(ClientServeReturnState::Complete(target_client, target_file));
+            done_sender.send(ChannelState::Complete(target_client, target_file));
         });
     }
     
@@ -213,7 +169,7 @@ async fn main() {
         _ => {}
     }
 
-    let (shutdown_send, mut shutdown_recv) = broadcast::channel::<()>(16);
+    let (shutdown_send, mut shutdown_recv) = broadcast::channel::<ChannelState>(16);
     let shutdown_send2 = shutdown_send.clone();
     /*let mode = env::args().nth(1).unwrap().to_lowercase();
     match mode.as_str() {
@@ -230,7 +186,7 @@ async fn main() {
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
-            shutdown_send.send(()).unwrap();
+            shutdown_send.send(ChannelState::Shutdown).unwrap();
         },
         _ = shutdown_recv.recv() => {},
     };
